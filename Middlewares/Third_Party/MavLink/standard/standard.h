@@ -1,0 +1,3 @@
+#ifndef MAVLINK_STANDARD_H
+#define MAVLINK_STANDARD_H
+#endif
