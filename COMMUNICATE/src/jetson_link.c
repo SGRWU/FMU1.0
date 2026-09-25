@@ -6,8 +6,14 @@
 #include "semphr.h"
 #include "task.h"
 #include "queue.h" 
+#include "uwb.h"
+#include "position_estimator.h"
 
-mavlink_system_t mavlink_system = {1, 200};
+
+mavlink_system_t mavlink_system = {
+    1,  /* system id */
+    1   /* MAV_COMP_ID_AUTOPILOT1 */
+};
 
 static uint8_t rx_buf;
 static mavlink_message_t msg;
@@ -72,20 +78,53 @@ static void param_send_all(void)
 }
 
 
+/* 用于发布位置信息，在jetsonLinkTask里调用 */
+static void localPositionPublish(void)
+{
+    localPositionNed_t position;
+    const uint8_t requiredFlags = LOCAL_POSITION_XY_VALID | LOCAL_POSITION_Z_VALID | LOCAL_VELOCITY_XY_VALID | LOCAL_VELOCITY_Z_VALID;
+
+    if (!positionReadLatest(&position))
+    {
+        return;
+    }
+
+    if ((position.valid_flags & requiredFlags) != requiredFlags)
+    {
+        return;
+    }
+
+    if (!isfinite(position.x) || !isfinite(position.y) || !isfinite(position.z) || !isfinite(position.vx) || !isfinite(position.vy) || !isfinite(position.vz))
+    {
+        return;
+    }
+
+    mavlink_msg_local_position_ned_send(MAVLINK_COMM_0, position.timestamp_ms, position.x, position.y, position.z, position.vx, position.vy, position.vz);
+}
+
+
 
 void jetsonLinkTask(void *param)
 {
-    mavlink_tx_done = xSemaphoreCreateBinary();/*created to synchronize usart1 transmission*/
-    xSemaphoreGive(mavlink_tx_done);
 
-    angleControlInit(0.004f, 0.004f);
+	mavlink_tx_done = xSemaphoreCreateBinary();/*created to synchronize usart1 transmission*/
+	param_rx_queue = xQueueCreate(5U, sizeof(mavlink_message_t));/*queue recieve the mavlink message from jetson board*/
+
+	if (mavlink_tx_done == NULL || param_rx_queue == NULL)
+	{
+		vTaskDelete(NULL);
+		return;				/* 如果mavlink_tx_done和param_rx_queue创建失败，直接返回 */
+	}
 	
-		param_rx_queue = xQueueCreate(5, sizeof(mavlink_message_t));/*queue recieve the mavlink message from jetson board*/
+	xSemaphoreGive(mavlink_tx_done);
+	
+    angleControlInit(0.004f, 0.004f);
 	
     HAL_UART_Receive_IT(&huart1, &rx_buf, 1);
 
     uint32_t lastAtt = xTaskGetTickCount();/*used to control send frequence of attitude*/
-    uint32_t lastHb  = xTaskGetTickCount();/*used to control send freqience of heartbeat*/
+    uint32_t lastHb = xTaskGetTickCount();/*used to control send freqience of heartbeat*/
+	uint32_t lastLocalPosition = xTaskGetTickCount();/*used to control send freqience of position*/
 	
     while (1)
     {
@@ -96,12 +135,7 @@ void jetsonLinkTask(void *param)
         if (now - lastHb >= 1000)
         {
             lastHb = now;
-						mavlink_msg_heartbeat_send(MAVLINK_COMM_0,
-								0,    // MAV_TYPE_GENERIC
-								0,    // MAV_AUTOPILOT_GENERIC
-								0,    // base_mode
-								0,    // custom_mode
-								4);   // MAV_STATE_ACTIVE
+			mavlink_msg_heartbeat_send(MAVLINK_COMM_0, UTTER_MAV_TYPE_SUBMARINE, UTTER_MAV_AUTOPILOT_GENERIC, 0U, 0U, UTTER_MAV_STATE_ACTIVE);
         }
 
         /* ATTITUDE: 50Hz */
@@ -114,7 +148,7 @@ void jetsonLinkTask(void *param)
             getAngleRateData(&gyr);
 
             mavlink_msg_attitude_send(MAVLINK_COMM_0,
-                HAL_GetTick() * 1000,
+                HAL_GetTick(),
                 att.roll  * DEG2RAD,
                 att.pitch * DEG2RAD,
                 att.yaw   * DEG2RAD,
@@ -122,74 +156,82 @@ void jetsonLinkTask(void *param)
                 gyr.y     * DEG2RAD,
                 gyr.z     * DEG2RAD);
         }
-
-				/* 处理参数请求队列（任务上下文，可安全调用 xSemaphoreTake） */
-				
-				mavlink_message_t qmsg;
-				
-				while (xQueueReceive(param_rx_queue, &qmsg, 0) == pdTRUE)
+		
+		/* LOCAL_POSITION_NED: 50Hz */
+		if ((uint32_t)(now - lastLocalPosition) >= LOCAL_POSITION_SEND_PERIOD_MS)
+		{
+			lastLocalPosition = now;
+			localPositionPublish();
+		}
+		
+		
+		/* 处理参数请求队列（任务上下文，可安全调用 xSemaphoreTake） */
+		
+		mavlink_message_t qmsg;
+		
+		while (xQueueReceive(param_rx_queue, &qmsg, 0) == pdTRUE)
+		{
+				switch (qmsg.msgid)
 				{
-						switch (qmsg.msgid)
-						{
-						case MAVLINK_MSG_ID_PARAM_REQUEST_LIST://21
-							  param_send_index = 0;
-								//param_send_all();
-								break;
+				case MAVLINK_MSG_ID_PARAM_REQUEST_LIST://21
+					  param_send_index = 0;
+						//param_send_all();
+						break;
 
-						case MAVLINK_MSG_ID_PARAM_REQUEST_READ://20
-						{
-								mavlink_param_request_read_t req;
-								mavlink_msg_param_request_read_decode(&qmsg, &req);
-								int16_t idx = -1;
-								if (req.param_index >= 0 && req.param_index < PARAM_COUNT)
-										idx = req.param_index;
-								else if (req.param_id[0] != '\0')
-										idx = param_find_by_id((const char *)req.param_id);
-								if (idx >= 0)
-										param_send_value(idx);
-								break;
-						}
+				case MAVLINK_MSG_ID_PARAM_REQUEST_READ://20
+				{
+						mavlink_param_request_read_t req;
+						mavlink_msg_param_request_read_decode(&qmsg, &req);
+						int16_t idx = -1;
+						if (req.param_index >= 0 && req.param_index < PARAM_COUNT)
+								idx = req.param_index;
+						else if (req.param_id[0] != '\0')
+								idx = param_find_by_id((const char *)req.param_id);
+						if (idx >= 0)
+								param_send_value(idx);
+						break;
+				}
 
-						case MAVLINK_MSG_ID_PARAM_SET://23
+				case MAVLINK_MSG_ID_PARAM_SET://23
+				{
+						mavlink_param_set_t p;
+						mavlink_msg_param_set_decode(&qmsg, &p);
+						int16_t idx = param_find_by_id((const char *)p.param_id);
+						if (idx >= 0)
 						{
-								mavlink_param_set_t p;
-								mavlink_msg_param_set_decode(&qmsg, &p);
-								int16_t idx = param_find_by_id((const char *)p.param_id);
-								if (idx >= 0)
-								{
-										*param_table[idx].value = p.param_value;
-										param_send_value(idx);
-								}
-								break;
+								*param_table[idx].value = p.param_value;
+								param_send_value(idx);
 						}
-						
-						case MAVLINK_MSG_ID_RC_CHANNELS_OVERRIDE://70
-						{
-								mavlink_rc_channels_override_t rc;
-								mavlink_msg_rc_channels_override_decode(&qmsg, &rc);
-
-								volatile setpointCache_t *back = &sp_cache[!sp_active];
-								back->yaw  = (rc.chan1_raw - 1500.0f) * 180.0f / 500.0f;   // ±500 → ±500
-								back->pitch    = (rc.chan2_raw - 1500.0f) * (30.0f / 500.0f);
-								back->heave  = (rc.chan3_raw - 1500.0f) * 500.0f / 500.0f;
-								back->thrust = (rc.chan4_raw - 1500.0f) * 500.0f / 500.0f;     // 1000→0.0, 1500→0.5, 2000→1.0
-								sp_active = !sp_active;
-								break;
-						}
-						default:
-								break;
-						}
+						break;
 				}
 				
-				if (param_send_index >= 0 && param_send_index < PARAM_COUNT)
+				case MAVLINK_MSG_ID_RC_CHANNELS_OVERRIDE://70
 				{
-						param_send_value(param_send_index);
-						param_send_index++;
+						mavlink_rc_channels_override_t rc;
+						mavlink_msg_rc_channels_override_decode(&qmsg, &rc);
+
+						volatile setpointCache_t *back = &sp_cache[!sp_active];
+						back->yaw  = (rc.chan1_raw - 1500.0f) * 180.0f / 500.0f;   // ±500 → ±500
+						back->pitch    = (rc.chan2_raw - 1500.0f) * (30.0f / 500.0f);
+						back->heave  = (rc.chan3_raw - 1500.0f) * 500.0f / 500.0f;
+						back->thrust = (rc.chan4_raw - 1500.0f) * 500.0f / 500.0f;     // 1000→0.0, 1500→0.5, 2000→1.0
+						sp_active = !sp_active;
+						break;
 				}
-				else
-				{
-						param_send_index = -1;
+				default:
+						break;
 				}
+		}
+		
+		if (param_send_index >= 0 && param_send_index < PARAM_COUNT)
+		{
+				param_send_value(param_send_index);
+				param_send_index++;
+		}
+		else
+		{
+				param_send_index = -1;
+		}
 				
         vTaskDelay(1);
 				
@@ -200,24 +242,39 @@ void jetsonLinkTask(void *param)
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
+	BaseType_t higherPriorityTaskWoken = pdFALSE;
+	
+	if (huart == NULL)
+    {
+        return;
+    }
+	
+	/* 处理与卡片电脑的通信 */
     if (huart->Instance == USART1)
     {
         if (mavlink_parse_char(MAVLINK_COMM_0, rx_buf, &msg, &status))
         {
             parsed_frames++;
 
-            /* 把参数相关的消息推进队列，不在 ISR 里处理 */
+            // 把参数相关的消息推进队列，不在 ISR 里处理 
 						if (msg.msgid == MAVLINK_MSG_ID_PARAM_REQUEST_LIST ||
 								msg.msgid == MAVLINK_MSG_ID_PARAM_REQUEST_READ ||
 								msg.msgid == MAVLINK_MSG_ID_PARAM_SET ||
 								msg.msgid == MAVLINK_MSG_ID_SET_ATTITUDE_TARGET||
 								msg.msgid == MAVLINK_MSG_ID_RC_CHANNELS_OVERRIDE)
 						{
-								xQueueSendFromISR(param_rx_queue, &msg, NULL);
+								xQueueSendFromISR(param_rx_queue, &msg, &higherPriorityTaskWoken);
 						}
         }
-        HAL_UART_Receive_IT(&huart1, &rx_buf, 1);
+        HAL_UART_Receive_IT(&huart1, &rx_buf, 1U);
+		portYIELD_FROM_ISR(higherPriorityTaskWoken);
     }
+	
+	/* 处理与UWB的通信 */
+	if(huart->Instance == USART6)
+	{
+		uwbRxCpltFromISR();
+	}
 }
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)

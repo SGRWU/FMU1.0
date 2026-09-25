@@ -19,7 +19,7 @@ void stateControl(volatile control_t *control, sensorData_t *sensors, state_t *s
 		{
 				float error = setpoint->attitude.pitch - state->attitude.pitch;
 
-				if (fabsf(error) < 10.0f)       // ±10° 以内不纠正
+				if (fabsf(error) < 50.0f)       // ±10° 以内不纠正
 						error = 0.0f;
 
 				float desRatePitch = pidUpdate(&pidPitch, error);

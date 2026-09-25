@@ -85,6 +85,10 @@ void Error_Handler(void);
 #define IMU_MISO_GPIO_Port GPIOB
 #define IMU_MOSI_Pin GPIO_PIN_5
 #define IMU_MOSI_GPIO_Port GPIOB
+#define DEPTH_SCL_Pin GPIO_PIN_6
+#define DEPTH_SCL_GPIO_Port GPIOB
+#define DEPTH_SDA_Pin GPIO_PIN_7
+#define DEPTH_SDA_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

@@ -1,0 +1,12 @@
+﻿MDK-ARM/utterIV/
+MDK-ARM/*.uvguix.*
+MDK-ARM/*.uvoptx
+*.o
+*.d
+*.crf
+*.axf
+*.hex
+*.map
+*.lnp
+*.dep
+*.build_log.htm

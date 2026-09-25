@@ -10,10 +10,57 @@
 
 typedef struct
 {
+    uint32_t timestamp_ms;
+
+    float x;
+    float y;
+    float z;
+
+    float vx;
+    float vy;
+    float vz;
+
+    uint8_t valid_flags;
+} localPositionNed_t;
+
+/* 深度传感器数据 */
+typedef struct
+{
+    uint32_t timestamp;
+
+    float pressure_mbar;
+    float temperature_c;
+
+    float depth_raw_m;
+    float depth_filtered_m;
+
+    uint16_t error_count;
+
+    bool valid;
+    bool calibrated;
+} depthData_t;
+
+
+/* 陀螺仪数据类型 */
+typedef struct
+{
+	
 	Axis3f acc;
 	Axis3f gyro;
+	
+} imuData_t;
+
+
+/* 传感器数据类型 */
+typedef struct
+{
+    Axis3f acc;
+    Axis3f gyro;
+
+    depthData_t depth;
 } sensorData_t;
 
+/* 3×1向量 */
 struct  vec3_s 
 {
 	uint32_t timestamp;
@@ -38,39 +85,13 @@ typedef struct
 } attitude_t;
 
 
-/* Orientation as a quaternion */
-typedef struct quaternion_s 
-{
-	uint32_t timestamp;
-
-	union 
-	{
-		struct 
-		{
-			float q0;
-			float q1;
-			float q2;
-			float q3;
-		};
-		struct 
-		{
-			float x;
-			float y;
-			float z;
-			float w;
-		};
-	};
-} quaternion_t;
-
-
 typedef struct
 {
 	attitude_t attitude;
-	quaternion_t attitudeQuaternion;
 	point_t position;
 	velocity_t velocity;
 	acc_t acc;
-	bool isRCLocked;
+	uint8_t local_position_valid_flags;
 } state_t;
 
 /*contorl value of joystick output*/
@@ -87,7 +108,6 @@ typedef struct
 typedef struct
 {
 	attitude_t attitude;		// deg	
-	attitude_t attitudeRate;	// deg/s
 	point_t position;         	// m
 	velocity_t velocity;      	// m/s
 	float heave;
